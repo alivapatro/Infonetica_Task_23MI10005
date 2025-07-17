@@ -1,130 +1,150 @@
 using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Setup for Swagger for docs and testing
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Swagger setup
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-// In-memory stores
-var workflowDefinitions = new ConcurrentDictionary<string, WorkflowDefinition>();
-var workflowInstances = new ConcurrentDictionary<string, WorkflowInstance>();
+// In-memory stores for workflow definitions and running instances
+var definitionsStore = new ConcurrentDictionary<string, WorkflowDefinition>();
+var instanceStore = new ConcurrentDictionary<string, WorkflowInstance>();
 
-// Hello World
-app.MapGet("/", () => "Workflow Engine API");
+// welcome route
+app.MapGet("/", () => "Welcome to the Workflow Engine API");
 
-// Create a new workflow definition
-app.MapPost("/workflows", (WorkflowDefinition def) =>
+// Create a workflow definition
+app.MapPost("/workflows", (WorkflowDefinition workflow) =>
 {
-    if (string.IsNullOrWhiteSpace(def.Id) || workflowDefinitions.ContainsKey(def.Id))
-        return Results.BadRequest("Workflow definition must have a unique, non-empty Id.");
+    // Make sure ID is present and unique
+    if (string.IsNullOrWhiteSpace(workflow.Id) || definitionsStore.ContainsKey(workflow.Id))
+        return Results.BadRequest("Missing or duplicate workflow Id.");
 
-    if (def.States.Count == 0 || def.States.Count(s => s.IsInitial) != 1)
-        return Results.BadRequest("Workflow must have exactly one initial state.");
+    // Needs one initial state exactly
+    var initialCount = workflow.States.Count(s => s.IsInitial);
+    if (initialCount != 1)
+        return Results.BadRequest("Workflow should have one initial state (found " + initialCount + ").");
 
-    if (def.States.GroupBy(s => s.Id).Any(g => g.Count() > 1))
-        return Results.BadRequest("Duplicate state IDs detected.");
+    // Check for repeated state IDs
+    if (workflow.States.GroupBy(s => s.Id).Any(g => g.Count() > 1))
+        return Results.BadRequest("Duplicate state IDs found.");
 
-    if (def.Actions.GroupBy(a => a.Id).Any(g => g.Count() > 1))
-        return Results.BadRequest("Duplicate action IDs detected.");
+    // Check for repeated action IDs too
+    if (workflow.Actions.GroupBy(a => a.Id).Any(g => g.Count() > 1))
+        return Results.BadRequest("Duplicate action IDs found.");
 
-    if (def.Actions.Any(a => a.ToState == null || !def.States.Any(s => s.Id == a.ToState)))
-        return Results.BadRequest("Action 'toState' must exist in defined states.");
+    // Every action's target state must actually exist
+    foreach (var action in workflow.Actions)
+    {
+        if (string.IsNullOrWhiteSpace(action.ToState) || !workflow.States.Any(s => s.Id == action.ToState))
+            return Results.BadRequest($"Invalid target state for action: {action.Id}");
+    }
 
-    workflowDefinitions[def.Id] = def;
-    return Results.Ok(def);
+    definitionsStore[workflow.Id] = workflow;
+    return Results.Ok(workflow);
 });
 
-// Get a workflow definition
+// Get a workflow definition by ID
 app.MapGet("/workflows/{id}", (string id) =>
 {
-    if (workflowDefinitions.TryGetValue(id, out var def))
-        return Results.Ok(def);
-    return Results.NotFound("Workflow definition not found");
+    if (definitionsStore.TryGetValue(id, out var found))
+        return Results.Ok(found);
+
+    return Results.NotFound("Workflow not found, check the ID");
 });
 
-// Start a workflow instance
+// Start a new workflow instance
 app.MapPost("/workflows/{id}/instances", (string id) =>
 {
-    if (!workflowDefinitions.TryGetValue(id, out var def))
-        return Results.NotFound("Workflow definition not found");
+    if (!definitionsStore.TryGetValue(id, out var definition))
+        return Results.NotFound("No workflow found with given ID, check the ID.");
 
-    var initialState = def.States.First(s => s.IsInitial);
+    // I’m assuming this always has one initial state due to earlier validation
+    var startingState = definition.States.FirstOrDefault(s => s.IsInitial);
+    if (startingState == null)
+        return Results.BadRequest("Initial state is missing, check the workflow definition");
 
-    var instance = new WorkflowInstance
+    var newInstance = new WorkflowInstance
     {
         Id = Guid.NewGuid().ToString(),
         DefinitionId = id,
-        CurrentStateId = initialState.Id,
+        CurrentStateId = startingState.Id,
         History = new List<ActionHistory>()
     };
 
-    workflowInstances[instance.Id] = instance;
-    return Results.Ok(instance);
+    instanceStore[newInstance.Id] = newInstance;
+    return Results.Ok(newInstance);
 });
 
-// Get a workflow instance
+// Retrieve a specific workflow instance
 app.MapGet("/instances/{id}", (string id) =>
 {
-    if (workflowInstances.TryGetValue(id, out var instance))
+    if (instanceStore.TryGetValue(id, out var instance))
         return Results.Ok(instance);
-    return Results.NotFound("Workflow instance not found");
+
+    return Results.NotFound("Workflow instance not found, check the ID");
 });
 
-// Execute an action on an instance
+// Apply an action transition on an instance
 app.MapPost("/instances/{instanceId}/actions/{actionId}", (string instanceId, string actionId) =>
 {
-    if (!workflowInstances.TryGetValue(instanceId, out var instance))
-        return Results.NotFound("Instance not found");
+    if (!instanceStore.TryGetValue(instanceId, out var runningInstance))
+        return Results.NotFound("Workflow instance not found, check the ID");
 
-    if (!workflowDefinitions.TryGetValue(instance.DefinitionId, out var def))
-        return Results.NotFound("Definition not found");
+    if (!definitionsStore.TryGetValue(runningInstance.DefinitionId, out var definition))
+        return Results.NotFound("Definition for this instance is missing.");
 
-    var action = def.Actions.FirstOrDefault(a => a.Id == actionId);
-    if (action == null)
-        return Results.BadRequest("Action not found");
+    var actionToApply = definition.Actions.FirstOrDefault(a => a.Id == actionId);
+    if (actionToApply == null)
+        return Results.BadRequest("No such action in the workflow.");
 
-    if (!action.Enabled)
-        return Results.BadRequest("Action is disabled");
+    if (!actionToApply.Enabled)
+        return Results.BadRequest("Action is currently disabled.");
 
-    if (!action.FromStates.Contains(instance.CurrentStateId))
-        return Results.BadRequest("Current state does not allow this action");
+    // checking if this action can be done from current state
+    if (!actionToApply.FromStates.Contains(runningInstance.CurrentStateId))
+        return Results.BadRequest("Action not valid from current state.");
 
-    var currentState = def.States.First(s => s.Id == instance.CurrentStateId);
+    var currentState = definition.States.First(s => s.Id == runningInstance.CurrentStateId);
     if (currentState.IsFinal)
-        return Results.BadRequest("Cannot act on a final state");
+        return Results.BadRequest("Current state is final. Can't move forward.");
 
-    var toState = def.States.FirstOrDefault(s => s.Id == action.ToState);
-    if (toState == null)
-        return Results.BadRequest("Target state not found");
+    // Double checking if the next state is valid
+    var nextState = definition.States.FirstOrDefault(s => s.Id == actionToApply.ToState);
+    if (nextState == null)
+        return Results.BadRequest("Next state not found. Definition might be broken.");
 
-    instance.CurrentStateId = toState.Id;
-    instance.History.Add(new ActionHistory
+    runningInstance.CurrentStateId = nextState.Id;
+    runningInstance.History.Add(new ActionHistory
     {
-        ActionId = action.Id,
+        ActionId = actionToApply.Id,
         Timestamp = DateTime.UtcNow
     });
 
-    return Results.Ok(instance);
+    return Results.Ok(runningInstance);
 });
 
 app.Run();
 
-// Models
+
+
+
 public class State
 {
     public string Id { get; set; } = default!;
     public string Name { get; set; } = default!;
     public bool IsInitial { get; set; }
     public bool IsFinal { get; set; }
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = true; 
 }
 
 public class ActionTransition

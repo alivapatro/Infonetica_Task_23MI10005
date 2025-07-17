@@ -30,3 +30,4 @@ C:\Users\aliva\WorkflowEngine\obj\Debug\net8.0\refint\WorkflowEngine.dll
 C:\Users\aliva\WorkflowEngine\obj\Debug\net8.0\WorkflowEngine.pdb
 C:\Users\aliva\WorkflowEngine\obj\Debug\net8.0\WorkflowEngine.genruntimeconfig.cache
 C:\Users\aliva\WorkflowEngine\obj\Debug\net8.0\ref\WorkflowEngine.dll
+C:\Users\aliva\WorkflowEngine\obj\Debug\net8.0\WorkflowEngine.sourcelink.json
